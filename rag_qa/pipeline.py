@@ -20,16 +20,18 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 def make_llm(model: str, temperature: float = 0.0) -> BaseChatModel:
+    if model.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature)
     from langchain_openai import ChatOpenAI
-
     return ChatOpenAI(model=model, temperature=temperature)
 
 
 @dataclass
 class RetrievedChunk:
     document: Document
-    vector_rank: int        # 1-based position in the FAISS results
-    vector_score: float     # cosine similarity (higher is better)
+    vector_rank: int
+    vector_score: float
     rerank_score: float | None = None
 
     @property
@@ -50,92 +52,9 @@ class RAGAnswer:
     question: str
     answer: str
     contexts: list[RetrievedChunk]
-    cited: list[int] = field(default_factory=list)  # 1-based indices into contexts
+    cited: list[int] = field(default_factory=list)
     latency_s: float = 0.0
 
     @property
     def abstained(self) -> bool:
         return is_abstention(self.answer)
-
-    @property
-    def cited_chunks(self) -> list[RetrievedChunk]:
-        return [self.contexts[i - 1] for i in self.cited if 0 < i <= len(self.contexts)]
-
-
-def is_abstention(answer: str) -> bool:
-    norm = answer.strip().lower().replace("’", "'")
-    return NO_ANSWER.lower().rstrip(".") in norm
-
-
-def format_context(chunks: list[RetrievedChunk]) -> str:
-    return "\n\n".join(
-        f"[{i}] (source: {c.source})\n{c.text}" for i, c in enumerate(chunks, 1)
-    )
-
-
-class RAGPipeline:
-    def __init__(
-        self,
-        settings: Settings | None = None,
-        vectorstore: FAISS | None = None,
-        llm: BaseChatModel | None = None,
-        reranker: Reranker | None = None,
-    ):
-        self.settings = settings or get_settings()
-        self.vectorstore = vectorstore or load_index(self.settings)
-        self._llm = llm
-        self._reranker = reranker
-
-    @property
-    def llm(self) -> BaseChatModel:
-        if self._llm is None:
-            self._llm = make_llm(self.settings.llm_model, self.settings.temperature)
-        return self._llm
-
-    @property
-    def reranker(self) -> Reranker:
-        if self._reranker is None:
-            self._reranker = get_reranker(self.settings, llm=self._llm)
-        return self._reranker
-
-    # ---- retrieval -------------------------------------------------------------
-    def vector_search(self, question: str, k: int | None = None) -> list[RetrievedChunk]:
-        k = k or self.settings.fetch_k
-        hits = self.vectorstore.similarity_search_with_score(question, k=k)
-        # With normalised vectors FAISS returns squared L2 distance d = 2 - 2cos.
-        return [
-            RetrievedChunk(document=doc, vector_rank=i, vector_score=1.0 - float(dist) / 2.0)
-            for i, (doc, dist) in enumerate(hits, 1)
-        ]
-
-    def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
-        top_k = top_k or self.settings.top_k
-        candidates = self.vector_search(question, self.settings.fetch_k)
-        by_id = {id(c.document): c for c in candidates}
-        reranked = self.reranker.rerank(question, [c.document for c in candidates], top_k)
-        out = []
-        for doc, score in reranked:
-            chunk = by_id[id(doc)]
-            chunk.rerank_score = score
-            out.append(chunk)
-        return out
-
-    # ---- generation ------------------------------------------------------------
-    def generate(self, question: str, chunks: list[RetrievedChunk]) -> str:
-        if not chunks:
-            return NO_ANSWER
-        chain = ANSWER_PROMPT | self.llm | StrOutputParser()
-        return chain.invoke({"question": question, "context": format_context(chunks)}).strip()
-
-    def answer(self, question: str) -> RAGAnswer:
-        start = time.perf_counter()
-        chunks = self.retrieve(question)
-        text = self.generate(question, chunks)
-        cited = sorted({int(n) for n in _CITATION_RE.findall(text)})
-        return RAGAnswer(
-            question=question,
-            answer=text,
-            contexts=chunks,
-            cited=cited,
-            latency_s=time.perf_counter() - start,
-        )
