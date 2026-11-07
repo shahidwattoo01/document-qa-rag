@@ -1,10 +1,4 @@
-"""Embedding backends.
-
-- ``openai``      : OpenAI embeddings (default, used for the real pipeline).
-- ``huggingface`` : local sentence-transformers model, no API key needed.
-- ``hashing``     : dependency-free hashed bag-of-words vectors. Lexical only, but fully
-                    deterministic and offline, which makes it ideal for unit tests and CI.
-"""
+"""Embedding backends: google (default), openai, huggingface, hashing."""
 
 from __future__ import annotations
 
@@ -24,8 +18,6 @@ _STOPWORDS = frozenset(
 
 
 class HashingEmbeddings(Embeddings):
-    """Signed feature-hashing of unigrams + bigrams, L2-normalised."""
-
     def __init__(self, dim: int = 1024):
         self.dim = dim
 
@@ -49,11 +41,8 @@ class HashingEmbeddings(Embeddings):
 
 
 class SentenceTransformerEmbeddings(Embeddings):
-    """Thin wrapper so we don't need the extra langchain-huggingface package."""
-
     def __init__(self, model_name: str):
         from sentence_transformers import SentenceTransformer
-
         self.model = SentenceTransformer(model_name)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -66,12 +55,14 @@ class SentenceTransformerEmbeddings(Embeddings):
 def get_embeddings(settings: Settings) -> Embeddings:
     provider = settings.embedding_provider
     model = settings.resolved_embedding_model
+    if provider == "google":
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        return GoogleGenerativeAIEmbeddings(model=model)
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
-
         return OpenAIEmbeddings(model=model)
     if provider == "huggingface":
         return SentenceTransformerEmbeddings(model)
     if provider == "hashing":
         return HashingEmbeddings()
-    raise ValueError(f"Unknown embedding provider: {provider!r} (expected openai | huggingface | hashing)")
+    raise ValueError(f"Unknown embedding provider: {provider!r}")
